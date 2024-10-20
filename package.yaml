@@ -1,0 +1,94 @@
+name:    chlm-common
+version: "0.0.0"
+
+dependencies:
+
+- base >=4.9.1.0 && <5
+- yesod >=1.6 && <1.7
+- yesod-core >=1.6 && <1.7
+- classy-prelude >=1.5 && <1.6
+- classy-prelude-conduit >=1.5 && <1.6
+- classy-prelude-yesod >=1.5 && <1.6
+- bytestring >=0.10 && <0.12
+- text >=0.11 && <2.0.3
+- persistent >=2.9 && <2.15
+- template-haskell
+- shakespeare >=2.0 && <2.2
+- hjsmin >=0.1 && <0.3
+- monad-control >=0.3 && <1.1
+- data-default
+- aeson >=1.4 && <2.2
+- conduit >=1.0 && <2.0
+- conduit-extra
+- monad-logger >=0.3 && <0.4
+- file-embed
+- safe
+- unordered-containers
+- containers
+- vector
+- time
+- case-insensitive
+- foreign-store
+- transformers <= 0.6.2
+- http-types
+- exceptions
+- mtl
+- unliftio
+- uuid
+- Decimal == 0.5.2
+- aeson-schemas <= 1.4.3.0
+- utf8-string
+- resource-pool >= 0.2.3.2
+- random
+
+# The library contains all of our application code. The executable
+# defined below is just a thin wrapper.
+library:
+  source-dirs: src
+  exposed-modules:
+  - Model.Decimal
+  - Model.LocalTime
+  - Support.Cache
+  - Support.Common
+  - Support.DateTime
+  - Support.Db
+  - Support.Dict
+  - Support.Id
+  - Support.Response
+  - Support.Service
+  - Support.Validate
+  when:
+  - condition: (flag(dev)) || (flag(library-only))
+    then:
+      ghc-options:
+      - -Wall
+      - -fwarn-tabs
+      - -O0
+      cpp-options: -DDEVELOPMENT
+    else:
+      ghc-options:
+      - -Wall
+      - -fwarn-tabs
+      - -O2
+
+# Test suite
+tests:
+  chlm-common-test:
+    main: Spec.hs
+    source-dirs: test
+    ghc-options: -Wall
+    dependencies:
+    - chlm-common
+    - hspec >=2.0.0
+    - yesod-test
+
+# Define flags used by "yesod devel" to make compilation faster
+flags:
+  library-only:
+    description: Build for use with "yesod devel"
+    manual: false
+    default: false
+  dev:
+    description: Turn on development settings, like auto-reload templates.
+    manual: false
+    default: false
