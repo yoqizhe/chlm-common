@@ -2,30 +2,44 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE ConstrainedClassMethods #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE AllowAmbiguousTypes #-}
-{-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE InstanceSigs #-}
 
-module Support.Service where
+module Support.Service
+( ServiceContext(..)
+, RawUserIdGetter(..)
+, ServeFor
+, ServiceException(..)
+, RunService(..)
+, MonadServe(..)
+, ServiceContextReader(..)
+, ctxTime
+, ctxUserId
+, ctxData
+, runServeFor
+, tryRunService
+, extractRightS
+, failS
+, failWhenS
+, checkDomainExistS
+) where
 
-import Control.Exception (Exception)
 import Data.Time.LocalTime (LocalTime)
-import Control.Monad.Trans.Reader (ReaderT, ask, runReaderT)
-import Database.Persist.Sql (SqlBackend, runSqlPool, rawExecute, PersistValue, RawSql, rawSql, insert, fromSqlKey, replace, getBy)
-import Database.Persist
+import Control.Monad.Trans.Reader (ReaderT(..), ask, runReaderT)
 import Control.Monad.Trans.Class (lift)
-import Yesod.Core.Types (HandlerFor, HandlerData)
-import ClassyPrelude.Yesod (YesodDB, runDB, YesodPersist, catch, YesodPersistBackend)
-import Support.Db
-import Support.DateTime
-import Support.Response
+import Yesod.Core.Types (HandlerFor)
+import ClassyPrelude.Yesod (MonadHandler(..), MonadResource(..))
+import Control.Monad.Logger (MonadLogger(..))
+import Support.Response(ExceptionResponse(..), responseFail, responseBusinessFail)
 import Data.Text (Text, pack)
-import Control.Monad.IO.Class (liftIO)
-import qualified Network.HTTP.Types            as H
-import UnliftIO.Exception
+import Control.Monad.IO.Class (MonadIO)
+import Control.Monad (when)
+import UnliftIO.Exception(Exception(..), SomeException, catch, throwIO)
+import UnliftIO (MonadUnliftIO(..))
 
 data ServiceException
     = DomainNotFoundException Text  
@@ -48,132 +62,102 @@ class RawUserIdGetter site where
     type RawUserId site :: *
     getRawUserId :: HandlerFor site (RawUserId site)
 
-data RawUserIdGetter site => ServiceContext site = ServiceContext
+data ServiceContext site a = ServiceContext
     { serviceCtxUserId :: RawUserId site
     , serviceCtxTime :: LocalTime
-  -- , dbConnection
+    , serviceData :: a
     }
 
--- Define the Domain type class
-class (RawUserIdGetter site, PersistEntity (Po domain), PersistEntityBackend (Po domain) ~ SqlBackend) => PoConverter site domain where
-    type Po domain
-    domainToInsertPo :: domain -> RawUserId site -> LocalTime -> Po domain
-    domainToUpdatePo :: Po domain -> domain -> RawUserId site -> LocalTime -> Po domain
-
-class (PersistEntity po, PersistEntityBackend po ~ SqlBackend) => DomainConverter po where
-    type Domain po
-    poToDomain :: po -> Domain po
-
 -- | Type alias for service handlers that can throw exceptions.
-type ServeFor site a = (RawUserIdGetter site) => ReaderT (ServiceContext site) (HandlerFor site) a
+newtype ServeFor site param a = ServeFor (ReaderT (ServiceContext site param) (HandlerFor site) a)
+    deriving (Functor, Applicative, Monad, MonadIO, MonadResource, MonadLogger)
 
-class Service service site where
-    type Output service
-    action :: service -> ServeFor site (Output service)
+instance MonadUnliftIO (ServeFor site param) where
+    withRunInIO :: ((forall a. ServeFor site param a -> IO a) -> IO b) -> ServeFor site param b
+    withRunInIO inner = ServeFor $ withRunInIO $ \runInIO ->
+        inner (runInIO . runDbServeFor)
+      where
+        runDbServeFor (ServeFor r) = r
 
-class ServiceRunner site where
+instance MonadHandler (ServeFor site param) where
+    type HandlerSite (ServeFor site param) = site
+    liftHandler handler = ServeFor $ lift handler
 
-    runService :: (Service service site) => service -> HandlerFor site (Output service)
+class Monad m => ServiceContextReader m where
+    type ScSite m
+    type ScParam m
+    ctx :: m (ServiceContext (ScSite m) (ScParam m))
 
-tryRunService :: (ServiceRunner site, Service service site) => service -> HandlerFor site (Either ServiceException (Output service))
-tryRunService service =
-    (runService service >>= return . Right) `catch` handleServiceException
+instance ServiceContextReader (ServeFor site param) where
+    type ScSite (ServeFor site param) = site
+    type ScParam (ServeFor site param) = param
+    ctx = ServeFor ask
 
-handleServiceException :: SomeException -> HandlerFor site (Either ServiceException a)
-handleServiceException e = 
-    case fromException e of
-        Just (ex :: ServiceException) -> return $ Left ex
-        Nothing -> throwIO $ UnexpectedExcpetion $ pack $ show e
+ctxTime :: (ServiceContextReader m) => m LocalTime
+ctxTime = serviceCtxTime <$> ctx
 
-toInsertPo :: forall site domain m. (RawUserIdGetter site, PoConverter site domain, Monad m) 
-           => domain -> ReaderT (ServiceContext site) m (Po domain)
-toInsertPo domain = do
-    ctx <- ask
-    return $ domainToInsertPo @site domain (serviceCtxUserId ctx) (serviceCtxTime ctx)
+ctxUserId :: (ServiceContextReader m) => m (RawUserId (ScSite m))
+ctxUserId = serviceCtxUserId <$> ctx
 
-toUpdatePo :: forall site domain m. (RawUserIdGetter site, PoConverter site domain, Monad m) 
-           => Po domain -> domain -> ReaderT (ServiceContext site) m (Po domain)
-toUpdatePo po domain = do
-    ctx <- ask
-    return $ domainToUpdatePo @site po domain (serviceCtxUserId ctx) (serviceCtxTime ctx)
+ctxData :: (ServiceContextReader m) => m  (ScParam m)
+ctxData = serviceData <$> ctx
 
-insertDo :: forall site domain m id. (RawUserIdGetter site, PoConverter site domain, YesodPersist site, YesodPersistBackend site ~ SqlBackend, SafeToInsert (Po domain)) 
-           => domain -> ReaderT (ServiceContext site) (HandlerFor site) (Key (Po domain))
-insertDo domain = do
-    ctx <- ask
-    po <- runReaderT (toInsertPo @site domain) ctx
-    result <- lift $ tryRunDB $ insert po
-    let serviceResult = dbException2serviceException result
-    case serviceResult of
-        Left e -> throwIO e 
-        Right r -> return r
+class Monad m => MonadServe m where
+    type ServeSite m
+    type ServeParam m
+    liftS :: ServeFor (ServeSite m) (ServeParam m) a -> m a
+    liftSwP :: ServeFor (ServeSite m) param a -> param -> m a
+    
 
-updateDo :: forall site domain m id. (RawUserIdGetter site, PoConverter site domain, YesodPersist site, YesodPersistBackend site ~ SqlBackend) 
-           => Key (Po domain) -> Po domain -> domain -> ReaderT (ServiceContext site) (HandlerFor site) ()
-updateDo poId oldPo domain = do
-    ctx <- ask
-    po <- runReaderT (toUpdatePo @site oldPo domain) ctx
-    liftIO $ print poId
-    result <- lift $ tryRunDB $ replace poId po
-    let serviceResult = dbException2serviceException result
-    case serviceResult of
-        Left e -> throwIO e 
-        Right r -> return r
+instance MonadServe (ServeFor site param) where
+    type ServeSite (ServeFor site param) = site
+    type ServeParam (ServeFor site param) = param
+    liftS = id
+    liftSwP service param = do
+        ServiceContext userId now _ <- ctx
+        let newCtx = ServiceContext userId now param
+        liftHandler $ runServeFor service newCtx
+    
 
-runOnExistPo :: forall site record m e a. 
-              (YesodPersist site
-              , YesodPersistBackend site ~ SqlBackend 
-              , PersistEntity record
-              , PersistEntityBackend record ~ SqlBackend
-              ) 
-           => Key record
-           -> Text 
-           -> (record -> ReaderT (ServiceContext site) (HandlerFor site) a) 
-           -> ReaderT (ServiceContext site) (HandlerFor site) a
-runOnExistPo poId tip action = do
-    mPo <- lift $ runDB $ get poId
-    case mPo of
+-- 实现 MonadResource 实例
+-- instance MonadResource (ServeFor site param) where
+--     liftResourceT = ServeFor . lift . liftResourceT
+
+-- 实现 MonadLogger 实例
+-- instance MonadLogger (ServeFor site param) where
+--     -- 这里只是一个示例实现，可以根据实际需求调整
+--     monadLoggerLog loc src lvl msg = ServeFor $ lift $ monadLoggerLog loc src lvl msg
+
+runServeFor :: ServeFor site param a -> ServiceContext site param -> HandlerFor site a
+runServeFor (ServeFor service) context = runReaderT service context
+
+class RunService site where
+
+    -- runService :: ServeFor site param result -> param -> HandlerFor site result
+    runService :: ServeFor site param result -> param -> HandlerFor site result
+
+tryRunService :: (RunService site) => ServeFor site param result -> param -> HandlerFor site (Either ServiceException result)
+tryRunService service param =
+    (Right <$> runService service param) `catch` handleServiceException
+    where
+        handleServiceException :: SomeException -> HandlerFor site (Either ServiceException a)
+        handleServiceException e = 
+            case fromException e of
+                Just (ex :: ServiceException) -> return $ Left ex
+                Nothing -> throwIO $ UnexpectedExcpetion $ pack $ show e
+
+failS :: MonadIO m => Text -> m ()
+failS = throwIO . GeneralServiceException
+
+failWhenS :: MonadIO m => Text -> Bool -> m ()
+failWhenS tip condition = when condition (failS tip)
+
+extractRightS :: (MonadIO m, Show e) => Either e a -> m a
+extractRightS (Left e) = throwIO $ GeneralServiceException (pack $ show e)  -- 在 Left 的情况下，调用 failS 并传递错误信息
+extractRightS (Right result) = return result
+
+checkDomainExistS :: MonadIO m => Text -> Maybe a -> m a
+checkDomainExistS tip target = do
+    case target of
         Nothing -> throwIO $ DomainNotFoundException tip
-        Just po -> action po
-
-runOnUniquePo :: forall site record m a. 
-              (YesodPersist site
-              , YesodPersistBackend site ~ SqlBackend 
-              , PersistEntity record
-              , PersistEntityBackend record ~ SqlBackend
-              ) 
-           => Unique record
-           -> Text 
-           -> ReaderT (ServiceContext site) (HandlerFor site) a
-           -> ReaderT (ServiceContext site) (HandlerFor site) a
-runOnUniquePo uniq tip action = do
-    mPo <- lift $ runDB $ getBy uniq
-    case mPo of
-        Just _ -> throwIO $ DomainExistException tip
-        Nothing -> action
-
-
-runOnExceptMeUniquePo :: forall site record m a. 
-              (YesodPersist site
-              , YesodPersistBackend site ~ SqlBackend 
-              , PersistEntity record
-              , PersistEntityBackend record ~ SqlBackend
-              ) 
-           => Key record
-           -> Unique record
-           -> Text 
-           -> ReaderT (ServiceContext site) (HandlerFor site) a
-           -> ReaderT (ServiceContext site) (HandlerFor site) a
-runOnExceptMeUniquePo key uniq tip action = do
-    mPo <- lift $ runDB $ getBy uniq
-    case mPo of
-        Just (Entity foundKey _)
-            | foundKey == key -> action
-            | otherwise -> throwIO $ DomainExistException tip
-        Nothing -> action
-
-dbException2serviceException :: Either DatabaseException a -> Either ServiceException a
-dbException2serviceException (Left (GeneralDatabaseException msg)) = Left $ GeneralServiceException msg
-dbException2serviceException (Left DuplicateEntryException) = Left $ GeneralServiceException "重复异常"
-dbException2serviceException (Right val) = Right val
-
+        Just o -> return o

@@ -13,19 +13,19 @@ import Data.Text (Text, intercalate)
 import qualified Data.Text as T
 import Database.Persist.Sql (SqlBackend, runSqlPool, rawExecute, PersistValue, RawSql, rawSql, toPersistValue, PersistField, fromSqlKey, ToBackendKey)
 import Database.Persist
-import Data.Maybe (mapMaybe, catMaybes)
-import Data.Decimal (Decimal)
+import Data.Maybe (mapMaybe, catMaybes, fromMaybe)
 import Model.Decimal
 import Yesod.Core
 -- YesodDB defined in here
-import ClassyPrelude.Yesod (YesodDB, runDB, YesodPersist, catch, YesodPersistBackend)
+import ClassyPrelude.Yesod (YesodDB, runDB, YesodPersist, catch, YesodPersistBackend, catMaybes)
+import UnliftIO.Exception
 
 data DatabaseException = GeneralDatabaseException Text | DuplicateEntryException
     deriving (Show)
 instance Exception DatabaseException
 
-handleDBException :: SomeException -> HandlerFor site (Either DatabaseException a)
-handleDBException e = 
+handleDBException :: Monad m => SomeException -> m (Either DatabaseException a)
+handleDBException e =
     let eMsg = T.pack $ show e
         in
         if "Duplicate" `T.isInfixOf` eMsg
@@ -38,6 +38,13 @@ tryRunDB dbAction =
         result <- runDB dbAction
         return $ Right result
     ) `catch` handleDBException
+
+onDuplicateKey :: MonadIO m => m (Maybe a) -> Either DatabaseException a -> m (Maybe a)
+onDuplicateKey action e = case e of
+    Left dbException -> case dbException of
+        DuplicateEntryException -> action
+        GeneralDatabaseException msg -> throwIO $ GeneralDatabaseException msg
+    Right r -> return $ Just r
 
 formatResults :: DbResultFormat a => [ResultTuple a] -> [a]
 formatResults results = map formatResult results
@@ -57,7 +64,7 @@ class RawSql(RawResult a) => TemplateResult a where
 
 -- YesodPersist site, ensure runDB
 -- YesodPersistBackend site ~ SqlBackend, ensure rawSql
-runSqlTemplate :: (YesodPersist site, SqlTemplate a, YesodPersistBackend site ~ SqlBackend, TemplateResult a) 
+runSqlTemplate :: (YesodPersist site, SqlTemplate a, YesodPersistBackend site ~ SqlBackend, TemplateResult a)
             => a -> HandlerFor site (Result a)
 runSqlTemplate param = do
     let sql = createTemplate param
@@ -66,31 +73,6 @@ runSqlTemplate param = do
     rawResults <- runDB myRawSql
     return $ formatTemplateResult param rawResults
 
-data DynamicValue where
-    DynamicInt    :: Int -> DynamicValue
-    DynamicText :: Text -> DynamicValue
-    DynamicBool   :: Bool -> DynamicValue
-    DynamicDecimal   :: Decimal -> DynamicValue
-
--- 辅助函数：将 DynamicValue 转换为 PersistValue
-toPersistValue' :: DynamicValue -> PersistValue
-toPersistValue' (DynamicInt i) = toPersistValue i
-toPersistValue' (DynamicText s) = toPersistValue s
-toPersistValue' (DynamicBool b) = toPersistValue b
-toPersistValue' (DynamicDecimal d) = toPersistValue d
-
-parseDynamicSqlItems :: Text -> [(Text, Maybe DynamicValue)] -> (Text, [PersistValue])
-parseDynamicSqlItems separator items =  
-    let validItems = mapMaybe unwrapItem items
-        columnNames = map fst validItems
-        query = intercalate separator columnNames
-        values = map (toPersistValue' . snd) validItems
-    in (query, values)
-
-unwrapItem :: (Text, Maybe DynamicValue) -> Maybe (Text, DynamicValue)
-unwrapItem (name, Just value) = Just (name, value)
-unwrapItem (_, Nothing) = Nothing
-
 rawEntityKey :: ToBackendKey SqlBackend record => Key record -> Int
 rawEntityKey = fromIntegral . fromSqlKey
 
@@ -98,7 +80,7 @@ icontains :: EntityField r T.Text -> T.Text -> Filter r
 icontains field val = Filter field (FilterValue $ T.concat ["%", val, "%"]) (BackendSpecificFilter " like ")
 
 someQuestionMarkInBracket :: Int -> Text
-someQuestionMarkInBracket questionMarkCount = 
+someQuestionMarkInBracket questionMarkCount =
     let questionMarks = intercalate "," (replicate questionMarkCount "?")
     in "(" <> questionMarks <> ")"
 
@@ -131,5 +113,10 @@ limitSql page size
 
 limitParams :: Int -> Int -> [PersistValue]
 limitParams page size
-    | page > 0 && size > 0 = [toPersistValue size, toPersistValue ((page - 1) * size)] 
+    | page > 0 && size > 0 = [toPersistValue size, toPersistValue ((page - 1) * size)]
+    | otherwise = []
+
+limitSelectOpt :: Int -> Int -> [SelectOpt record]
+limitSelectOpt pageNum pageSize
+    | pageSize > 0 = [LimitTo pageSize, OffsetBy $ (pageNum - 1) * pageSize]
     | otherwise = []

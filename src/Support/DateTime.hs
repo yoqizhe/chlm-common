@@ -34,9 +34,8 @@ createValidDayRange startDay endDay
   | startDay < endDay = Just DayRange { startDay = startDay, endDay = endDay }
   | otherwise         = Nothing
 
-
-createDayRange :: Day -> Day -> DayRange
-createDayRange startDay endDay = DayRange { startDay = startDay, endDay = endDay }
+-- createDayRange :: Day -> Day -> DayRange
+-- createDayRange startDay endDay = DayRange { startDay = startDay, endDay = endDay }
 
 localTimeAddDay :: LocalTime -> Int -> LocalTime
 localTimeAddDay localDateTime n =

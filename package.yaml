@@ -40,6 +40,8 @@ dependencies:
 - utf8-string
 - resource-pool >= 0.2.3.2
 - random
+- xlsx
+- lens
 
 # The library contains all of our application code. The executable
 # defined below is just a thin wrapper.
@@ -56,7 +58,11 @@ library:
   - Support.Id
   - Support.Response
   - Support.Service
+  - Support.DbService
   - Support.Validate
+  - Support.Excel
+  - Support.DynamicSql
+  - Support.Table
   when:
   - condition: (flag(dev)) || (flag(library-only))
     then:

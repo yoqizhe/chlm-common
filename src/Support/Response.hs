@@ -13,6 +13,7 @@ import qualified Data.Text as T
 import Control.Exception (Exception)
 import Data.Typeable (Typeable, cast)
 import Yesod.Core
+import Support.Excel
 
 
 data R a = RSuccess a | RError Int T.Text
@@ -44,9 +45,25 @@ responsePage :: (MonadHandler m, ToJSON a) => Int -> a -> m J.Value
 responsePage total content = do
     responseData $ object ["data" .= content, "total" .= total] 
 
-responseFail :: (MonadHandler m) => T.Text -> m J.Value
+responseExcel :: (MonadHandler m, ExcelData a) => T.Text -> a -> m TypedContent
+responseExcel excelName excelData = do
+    byteData <- convertToExcelBS excelName excelData
+    let content = TypedContent "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" (toContent byteData)
+    addHeader "Content-Disposition" $ "attachment; filename=" <> "export" <> ".xlsx"
+    sendResponseStatus H.status200 content
+
+responseTypeContentError :: (MonadHandler m) => T.Text -> m TypedContent
+responseTypeContentError errMsg = do
+  let errorJson = object ["error" .= errMsg]
+  return $ toTypedContent $ toJSON errorJson
+
+responseFail :: (MonadHandler m) => T.Text -> m a
 responseFail msg = do
     sendStatusJSON H.status500 $ toJSON $ (RError 500 msg :: R String)
+
+responseParamFail :: (MonadHandler m) => T.Text -> m a
+responseParamFail msg = do
+    sendStatusJSON H.status400 $ toJSON $ (RError 400 msg :: R T.Text)
 
 responseBusinessFail :: (MonadHandler m) => T.Text -> m J.Value
 responseBusinessFail msg = do
