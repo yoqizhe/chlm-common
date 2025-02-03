@@ -22,7 +22,6 @@ module Support.Service
 , ctxData
 , runServeFor
 , tryRunService
-, extractRightS
 , failS
 , failWhenS
 , checkDomainExistS
@@ -151,10 +150,6 @@ failS = throwIO . GeneralServiceException
 
 failWhenS :: MonadIO m => Text -> Bool -> m ()
 failWhenS tip condition = when condition (failS tip)
-
-extractRightS :: (MonadIO m, Show e) => Either e a -> m a
-extractRightS (Left e) = throwIO $ GeneralServiceException (pack $ show e)  -- 在 Left 的情况下，调用 failS 并传递错误信息
-extractRightS (Right result) = return result
 
 checkDomainExistS :: MonadIO m => Text -> Maybe a -> m a
 checkDomainExistS tip target = do
