@@ -43,6 +43,13 @@ requirePageParams = do
     let pageSize = fromMaybe 10 (pageSizeText >>= readMaybe . T.unpack)
     return (pageNum, pageSize)
 
+lookupParam :: MonadHandler m => Text -> m Text
+lookupParam param = do 
+    mResult <- lookupGetParam param
+    case mResult of
+        Nothing -> sendStatusJSON H.status400 $ toJSON $ (RError 400 param :: R T.Text)
+        Just a -> return a
+
 textToInt :: Text -> Maybe Int
 textToInt = readMaybe . T.unpack
 

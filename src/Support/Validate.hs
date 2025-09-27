@@ -70,11 +70,11 @@ extractEnum label n = do
         fail $ T.unpack label <> " 无效参数： " <> show n
     return (toEnum n)
 
-validateDayRange :: (MonadFail m) => Day -> Day -> m ()
-validateDayRange startDay endDay = do
-    if startDay >= endDay
-    then fail "开始日期大于结束日期"
-    else return ()
+validateDayRange :: (MonadFail m) => Bool -> Day -> Day -> m ()
+validateDayRange canEq startDay endDay = do
+    if canEq 
+       then when (startDay > endDay) $ fail "开始日期大于结束日期"
+       else when (startDay >= endDay) $ fail "开始日期大于或等于结束日期"
 
 extractEitherRight :: MonadFail m => (a -> Either Text a) -> a -> m a
 extractEitherRight f val = do
